@@ -1,0 +1,274 @@
+#!/usr/bin/python
+
+"""
+Modified by Phillip Hansen 2015
+
+Original script from: http://ventoso.org/luca/vdr/
+Copyright 2011 Luca Olivetti
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+"""
+
+###############################################
+# change these as needed
+PROJX='/opt/Project-X/ProjectX.jar'
+BDSUP2SUB='/opt/BDSup2Sub.jar'
+###############################################
+
+TIME_OFFSET=0
+
+from xml.dom import minidom
+from subprocess import Popen, PIPE, STDOUT
+import argparse
+import os
+import sys
+import tempfile, shutil
+import traceback
+
+def message(m):
+    print "============================>",m
+
+def convtc(intc):
+    """Convert sony timecode to srt timecode at 25fps and add fixed offset"""
+    hours=int(intc[:2])
+    minutes=int(intc[3:5])
+    seconds=int(intc[6:8])
+    frames=int(intc[9:])
+    total=hours*3600000+minutes*60000+seconds*1000+frames*1000/24+TIME_OFFSET
+    #The following should be needed in theory, in practice it messes up the timing
+    #in fact, removing this line most of this function is useless
+    #total=total * 24 / 25
+    ms=total % 1000
+    total=total/1000
+    seconds=total % 60
+    total=total/60
+    minutes=total % 60
+    hours=total/60
+    if webvtt_format:
+        return '%02d:%02d:%02d.%03d' % (hours,minutes,seconds,ms)
+    return '%02d:%02d:%02d,%03d' % (hours,minutes,seconds,ms)
+
+def which(program):
+    def is_exe(fpath):
+        return os.path.exists(fpath) and os.access(fpath, os.X_OK)
+    
+    fpath, fname = os.path.split(program)
+    if fpath:
+        if is_exe(program):
+            return program
+    else:
+        for path in os.environ["PATH"].split(os.pathsep):
+            exe_file = os.path.join(path, program)
+            if is_exe(exe_file):
+                return exe_file
+    
+    return None
+
+def snooppts(file,pid):
+    """Use dvbsnoop to obtain the first PTS"""
+    dvbsnoop = Popen(["dvbsnoop", "-if", file, "-s", "ts", "-tssubdecode", "-tf", pid, "-ph", "0", "-nph"], stdout=PIPE)
+    for line in dvbsnoop.stdout:
+        if line.find('==> PTS')>=0:
+            dvbsnoop.terminate()
+            return int(line.split()[2])
+    return 0
+
+doexit=False
+webvtt_format = False
+
+description = """Extract DVB subtitles from TS recordings
+
+This script uses ProjectX to extract the dvb subtitles,
+BDSup2Sub to convert them to images, and tesseract to
+convert the images to text. It also uses dvbsnoop to 
+detect the time difference between video and subtitles.
+
+Subtitles can be saved in either WebVTT (.vtt) or 
+SubRip (.srt) format.
+
+java, tesseract, and dvbsnoop must be in $PATH.
+Edit the script to set the location of ProjectX and BDSup2Sub jars
+"""
+parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawTextHelpFormatter)
+parser.add_argument("input_filename", help="a .ts recording with dvb subtitles")
+parser.add_argument("output_filename", help="the resulting subtitle file (.vtt or .srt)")
+parser.add_argument("-y", "--overwrite", action="store_true", help="overwrite output file without asking")
+args = parser.parse_args()
+
+finput = args.input_filename
+foutput = args.output_filename
+
+if foutput.endswith('.vtt'):
+    webvtt_format = True
+
+if not doexit and not os.path.exists(finput):
+    print "Input file %s doesn't exist" % finput
+    doexit=True
+
+if not doexit and os.path.exists(foutput) and not args.overwrite:
+    r=raw_input("Output file %s already exists, overwrite (Y/N)? " % foutput)
+    if r!='Y' and r!='y':
+        doexit=True
+
+if not os.path.exists(PROJX):
+    print "Missing ProjectX.jar at", PROJX
+    doexit=True
+
+if not os.path.exists(BDSUP2SUB):
+    print "Missing BDSup2Sub.jar at", BDSUP2SUB
+    doexit=True
+
+if not which('java'):
+    print "No java in $PATH"
+    doexit=True
+
+if not which('tesseract'):
+    print "No tesseract in $PATH"
+    doexit=True
+
+if not which('dvbsnoop'):
+    print "No dvbsnoop in $PATH"
+    doexit=True
+    
+if doexit:
+    exit()
+  
+olddir=os.getcwd()
+tempdir=tempfile.mkdtemp()       
+try:  
+    # create parameters (ini file) for Project-X
+ 
+    f=open(tempdir+'/X.ini','w')
+    f.write("""# Project-X INI
+# ProjectX 0.90.4.00.b32 / 30.12.2009
+
+# Application
+Application.Agreement=1
+Application.OutputDirectory=%s
+
+# CollectionPanel
+CollectionPanel.CutMode=0
+
+# SubtitlePanel
+SubtitlePanel.SubpictureColorModel=UkFreeview(mc)
+SubtitlePanel.enableHDSub=1
+SubtitlePanel.exportAsVobSub=1
+
+ExportPanel.Streamtype.MpgVideo=0
+ExportPanel.Streamtype.MpgAudio=0
+ExportPanel.Streamtype.Ac3Audio=0
+ExportPanel.Streamtype.PcmAudio=0
+ExportPanel.Streamtype.Teletext=0
+ExportPanel.Streamtype.Subpicture=1
+ExportPanel.Streamtype.Vbi=0
+""" % tempdir)
+    f.close()
+
+    #invoke Project-X to export the subtitles in vobsub format (sup is useless)
+    message('Starting ProjectX')
+    Popen(['java', '-jar', PROJX, '-ini', '%s/X.ini' % tempdir, '-name', 'xyzt', finput]).wait()
+    
+    # only continue if subtitles were exported
+    if not os.path.isfile(os.path.join(tempdir, 'xyzt.sup.sub')):
+        message("No subtitles exported")
+        exit()
+    
+    #look for video and subtitles pids in log file
+    vpid=None
+    readvpid=False
+    spid=None
+    readspid=False
+    f=open(tempdir+'/xyzt_log.txt','r')
+    for line in f:
+        if not vpid:
+            if readvpid:
+                readvpid=False
+                if line.startswith('PID:'):
+                    vpid=line.split()[1].split('(')[0]
+                    message('FOUND VIDEO PID '+vpid)         
+            else:
+                if line.startswith('Video:'):
+                    readvpid=True    
+        if not spid:
+            if readspid:
+                readspid=False
+                if line.startswith('PID:'):
+                    spid=line.split()[1].split('(')[0]
+                    message('FOUND SUBTITLES PID '+spid)         
+            else:
+                if line.startswith('Subpict.:'):
+                    readspid=True 
+        if vpid and spid:
+            break
+    f.close()
+    
+    if vpid and spid:
+        vpts=snooppts(finput,vpid)
+        spts=snooppts(finput,spid)
+        if vpts and spts and spts>vpts:
+            TIME_OFFSET=(spts-vpts) / 90
+            message( "TIME_OFFSET %d" % TIME_OFFSET)
+
+    #open output file before changing directory
+    f2=open(foutput,'w')
+    if webvtt_format:
+        f2.write('WEBVTT\n\n')
+    
+    #now work in temporary directory
+    os.chdir(tempdir) 
+    
+    #invoke BDsup2sub to generate the xml file and png images
+    message('Starting BDSup2Sub')
+    Popen(['java', '-jar', BDSUP2SUB, '-o', 'xyzt.xml', 'xyzt.sup.sub']).wait()
+ 
+    #parse xml file 
+    message('Doing the ocr')
+    f=open('xyzt.xml','r')
+    xmldoc=minidom.parse(f).documentElement
+    f.close()
+
+    #I'm only interested in events    
+    events=xmldoc.getElementsByTagName('Event')
+    i=0
+    l=len(events)
+    for event in events:
+        #get timecodes from event
+        intc=event.attributes['InTC'].nodeValue
+        outtc=event.attributes['OutTC'].nodeValue
+        #and the name of the image containing the subtitle
+        graph=event.getElementsByTagName('Graphic')
+        file=graph[0].childNodes[0].nodeValue
+        i=i+1
+        f2.write('%d\n' % i)
+        f2.write('%s --> %s\n' % (convtc(intc),convtc(outtc)))
+        # do the ocr using tesseract
+        Popen(['tesseract', file, 'out']).wait()
+        f3 = open('out.txt', 'r')
+        text = f3.read()
+        f3.close()
+        f2.write(text.strip() + '\n\n')
+        p=i*100/l
+        sys.stdout.write('\r%d' % p)
+        sys.stdout.write(' %')
+        sys.stdout.flush()
+    f2.close()
+except SystemExit:
+    pass
+except:
+    traceback.print_exc()
+  
+#delete temporary directory
+message("Deleting temporary directory")
+os.chdir(olddir)
+shutil.rmtree(tempdir)
