@@ -249,15 +249,22 @@ ExportPanel.Streamtype.Vbi=0
         #and the name of the image containing the subtitle
         graph=event.getElementsByTagName('Graphic')
         file=graph[0].childNodes[0].nodeValue
-        i=i+1
-        f2.write('%d\n' % i)
-        f2.write('%s --> %s\n' % (convtc(intc),convtc(outtc)))
         # do the ocr using tesseract
-        Popen(['tesseract', file, 'out']).wait()
+        # use page segmentation method #6 - "Assume a single uniform block of text."
+        # see: https://github.com/tesseract-ocr/tesseract/wiki/ImproveQuality#page-segmentation-method
+        Popen(['tesseract', file, 'out', '-psm', '6']).wait()
         f3 = open('out.txt', 'r')
         text = f3.read()
         f3.close()
-        f2.write(text.strip() + '\n\n')
+        # remove any blank lines
+        text = text.replace('\n\n', '\n').strip()
+        # skip this subtitle if no text was returned from the OCR process
+        if text == '':
+            continue
+        i=i+1
+        f2.write('%d\n' % i)
+        f2.write('%s --> %s\n' % (convtc(intc),convtc(outtc)))
+        f2.write(text + '\n\n')
         p=i*100/l
         sys.stdout.write('\r%d' % p)
         sys.stdout.write(' %')
